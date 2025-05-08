@@ -1,0 +1,8 @@
+{
+  "name": "yeahbuddy-walkthrough",
+  "version": "1.0.0",
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "ffmpeg-static": "^5.0.0"
+  }
+}
