@@ -1,17 +1,16 @@
 const puppeteer = require('puppeteer');
+const ffmpeg = require('ffmpeg-static');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 async function recordWalkthrough(url, pages, outputFile = 'walkthrough.mp4') {
-  // Ensure output directory exists
   const outputPath = path.join(__dirname, 'output');
-  if (!fs.existsSync(outputPath)) {
-    fs.mkdirSync(outputPath);
-  }
+  if (!fs.existsSync(outputPath)) fs.mkdirSync(outputPath);
   const fullOutputPath = path.join(outputPath, outputFile);
+  const tempDir = path.join(outputPath, 'temp');
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
-  // Launch Puppeteer in headless mode
   const browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -19,23 +18,21 @@ async function recordWalkthrough(url, pages, outputFile = 'walkthrough.mp4') {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
 
-  // Start screen recording with FFmpeg
-  execSync(
-    `ffmpeg -y -f x11grab -framerate 30 -s 1280x720 -i :0.0 -c:v libx264 -preset ultrafast ${fullOutputPath}`,
-    { stdio: 'ignore' }
-  );
-
-  // Navigate and record each page
-  for (const pagePath of pages) {
+  // Capture screenshots for each page
+  const screenshots = [];
+  for (let i = 0; i < pages.length; i++) {
+    const pagePath = pages[i];
     const fullUrl = pagePath.startsWith('http') ? pagePath : `${url}${pagePath}`;
     await page.goto(fullUrl, { waitUntil: 'networkidle2' });
 
-    // Simulate user interaction (scroll)
+    // Scroll and capture
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await new Promise(resolve => setTimeout(resolve, 10000)); // 10s per page
+    const screenshotPath = path.join(tempDir, `frame${i}.png`);
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    screenshots.push(screenshotPath);
   }
 
-  // Add YeahBuddy branding overlay
+  // Add branding overlay
   await page.evaluate(() => {
     const overlay = document.createElement('div');
     overlay.style.position = 'fixed';
@@ -49,18 +46,32 @@ async function recordWalkthrough(url, pages, outputFile = 'walkthrough.mp4') {
     overlay.innerText = 'Made by YeahBuddy.nz';
     document.body.appendChild(overlay);
   });
-  await new Promise(resolve => setTimeout(resolve, 5000)); // 5s for branding
+  const brandingPath = path.join(tempDir, 'branding.png');
+  await page.screenshot({ path: brandingPath });
+  screenshots.push(brandingPath);
 
-  // Stop recording
-  execSync('pkill ffmpeg', { stdio: 'ignore' });
-
-  // Close browser
   await browser.close();
+
+  // Create video from screenshots
+  const screenshotList = path.join(tempDir, 'screenshots.txt');
+  fs.writeFileSync(
+    screenshotList,
+    screenshots.map((s, i) => `file '${s}'\nduration ${i === screenshots.length - 1 ? 5 : 10}`).join('\n')
+  );
+
+  execSync(
+    `${ffmpeg} -y -f concat -safe 0 -i ${screenshotList} -c:v libx264 -pix_fmt yuv420p -r 30 ${fullOutputPath}`,
+    { stdio: 'ignore' }
+  );
+
+  // Clean up
+  fs.unlinkSync(screenshotList);
+  screenshots.forEach(s => fs.unlinkSync(s));
+  fs.rmdirSync(tempDir);
 
   return fullOutputPath;
 }
 
-// Vercel API endpoint
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -73,7 +84,6 @@ module.exports = async (req, res) => {
 
   try {
     const videoFile = await recordWalkthrough(url, pages);
-    // Serve the video file for download
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename=${path.basename(videoFile)}`);
     fs.createReadStream(videoFile).pipe(res);
